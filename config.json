@@ -1,0 +1,33 @@
+{
+    "Port":":8080",
+    "UseBindata":false,
+    "CookieStore":"zlt_com_cookie",
+    "SessionName":"zlt_com_session",
+    "Uploads":"./uploads/",
+
+    "DBType": "mysql",
+    "DBSource": "root:123456@tcp(localhost)/salary?charset=utf8mb4&parseTime=True&loc=Local",
+
+    "LogMode": true,
+    "LogFile":"./logs/all.log",
+
+    "RedisHost": "127.0.0.1:6379",
+    "RedisPass": "",
+    "RedisType":"tcp",
+
+    "ElasticEnable":true,
+    "ElasticHostURL":"http://gz.zhalute.gov.cn:9200/",
+    "ElasticIndexName":"test-salary",
+    "ElasticSQLLogName":"test-salary-sql-log",
+    "ElasticErrorLogName":"test-salary-err-log",
+    "ElasticInfoLogName":"test-salary-info-log",
+    "ElasticLoginLogName":"test-salary-login-log",
+    "ElasticUser":"elastic",
+    "ElasticPassword":"Elastic@808",
+    "ElasticSourceHost":"test-salary",
+
+    "NSQServerIP":"localhost:4150",
+    "NSQLookupd":"localhost:4161",
+    "NSQTopic":"salary"
+
+}
