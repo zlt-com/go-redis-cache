@@ -18,7 +18,7 @@ func init() {
 
 // Select
 func Select() {
-
+	fmt.Println(1)
 }
 
 func Create(key string, object interface{}) {
