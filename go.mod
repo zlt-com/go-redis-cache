@@ -4,7 +4,7 @@ go 1.16
 
 require (
 	github.com/360EntSecGroup-Skylar/excelize/v2 v2.4.0 // indirect
-	github.com/zlt-com/go-common v0.0.0-20210513085452-3c4f1661ab09 // indirect
+	github.com/zlt-com/go-common v0.0.0-20210513085452-3c4f1661ab09
 	github.com/zlt-com/go-config v0.0.0-20210514005831-7dbcf4e20ee9 // indirect
 	github.com/zlt-com/go-db v0.0.0-20210517032434-30653153ba1e
 	github.com/zlt-com/go-es v0.0.0-20210514005854-25a0f7235a4f // indirect
