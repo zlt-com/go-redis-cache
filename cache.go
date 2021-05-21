@@ -73,11 +73,17 @@ func getStructField(i interface{}) (sf *StructField) {
 			tags := parseTagSetting(fieldStruct.Tag)
 			fieldName := strings.ToLower(fieldStruct.Name)
 			if len(tags) > 0 {
+				// if fieldName == "id" {
+				// 	sf.Tags[fieldName] = tags
+				// 	sf.Index[fieldName] = sf.TableName + "_" + fieldName
+				// 	sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
+				// } else {
+
+				// }
 				sf.Tags[fieldName] = tags
 				sf.Index[fieldName] = sf.TableName + "_index_" + fieldName
 				sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
 			}
-
 			// sf.Values = append(sf.Values, refValue.Elem().Field(i).Interface())
 		}
 		// fmt.Printf("%6s: %v = %v\n", f.Name, f.Type, val)
@@ -87,17 +93,37 @@ func getStructField(i interface{}) (sf *StructField) {
 }
 
 // Select
-func (rc *RedisCache) Select() (reply interface{}, err error) {
+func (rc *RedisCache) Select() (reply []interface{}, err error) {
 	sf := getStructField(rc.Conditions.Model)
 	index := ""
+	indexValue := []interface{}{}
 	for key, value := range sf.Index {
-		if rc.Conditions.Field == key {
-			index = value
+		for whereKey, whereValue := range rc.Conditions.Where {
+			if whereKey == key {
+				index = value
+				if iv, err := selectIndex(index, whereValue); err != nil {
+					return nil, err
+				} else {
+					indexValue = append(indexValue, redisDb.String(iv))
+				}
+			}
 		}
+
 	}
-	if indexValue, err := selectIndex(index, rc.Conditions.Value); err == nil {
-		if reply, err = redisDb.Hget(sf.TableName, redisDb.String(indexValue)); err == nil && reply != nil {
-			reply = redisDb.String(reply)
+	// if indexValue, err := selectIndex(index, rc.Conditions.Value); err == nil && indexValue != nil {
+	// 	if reply, err = redisDb.Hget(sf.TableName, redisDb.String(indexValue)); err == nil && reply != nil {
+	// 		reply = redisDb.String(reply)
+	// 	}
+	// }
+	mgetField := []interface{}{sf.TableName}
+	// mgetField = append(mgetField, sf.TableName)
+	mgetField = append(mgetField, indexValue...)
+	if mgetValues, err := redisDb.Hmget(mgetField...); err != nil {
+		// reply = redisDb.String(reply)
+		fmt.Println(err)
+	} else {
+		for _, replyValue := range mgetValues {
+			reply = append(reply, redisDb.String(replyValue))
 		}
 	}
 
@@ -108,15 +134,33 @@ func selectIndex(index string, key interface{}) (reply interface{}, err error) {
 	return redisDb.Hget(index, key)
 }
 
-func (rc *RedisCache) Create() (err error) {
-	switch value := rc.Conditions.Value.(type) {
+func (rc *RedisCache) Delete() (err error) {
+	switch value := rc.Conditions.Instance.(type) {
 	case string:
 	case int:
 	case map[interface{}]interface{}:
 
 	default:
 		sf := getStructField(value)
-		if err = redisDb.Hset(sf.TableName, sf.KV["id"], common.Object2JSON(rc.Conditions.Value)); err != nil {
+		if err = redisDb.Hdel(sf.TableName, sf.KV["id"]); err != nil {
+			fmt.Println(err)
+		}
+		if err = deleteIndex(sf); err != nil {
+			fmt.Println(err)
+		}
+	}
+	return
+}
+
+func (rc *RedisCache) Create() (err error) {
+	switch value := rc.Conditions.Instance.(type) {
+	case string:
+	case int:
+	case map[interface{}]interface{}:
+
+	default:
+		sf := getStructField(value)
+		if err = redisDb.Hset(sf.TableName, sf.KV["id"], common.Object2JSON(rc.Conditions.Instance)); err != nil {
 			fmt.Println(err)
 		}
 		if err = createIndex(sf); err != nil {
@@ -129,10 +173,10 @@ func (rc *RedisCache) Create() (err error) {
 func createIndex(sf *StructField) (err error) {
 	for k, v := range sf.KV {
 		if k == "id" {
-			if err := redisDb.Zadd(sf.Index[k], v.(int), v); err != nil {
+			if err := redisDb.Zadd(sf.TableName+"_id", v.(int), v); err != nil {
 				fmt.Println(err)
 			}
-			continue
+			// continue
 		}
 
 		if tag := sf.Tags[k]; tag != nil {
@@ -146,11 +190,56 @@ func createIndex(sf *StructField) (err error) {
 							fmt.Println(err)
 						} else {
 							arry := make([]interface{}, 0)
-							muiltValue = append(muiltValue, common.JSON2Object(redisDb.String(v), arry))
+							obj, _ := common.JSON2Object(redisDb.String(v), arry)
+							muiltValue = append(muiltValue, obj)
 						}
 					}
 					muiltValue = append(muiltValue, v)
 					redisDb.Hset(sf.Index[k], k, common.Object2JSON(muiltValue))
+				}
+			}
+		}
+	}
+	return
+}
+
+func deleteIndex(sf *StructField) (err error) {
+	for k, v := range sf.KV {
+		if k == "id" {
+			if err := redisDb.Zrem(sf.TableName+"_id", v); err != nil {
+				fmt.Println(err)
+			}
+			// continue
+		}
+
+		if tag := sf.Tags[k]; tag != nil {
+			for _, tv := range tag {
+				if tv == "UNIQUE_INDEX" {
+					redisDb.Hdel(sf.Index[k], v)
+				} else if tv == "MUILT_INDEX" {
+					if ok, _ := redisDb.Hexists(sf.Index[k], k); ok {
+						if cacheValue, err := redisDb.Hget(sf.Index[k], k); err != nil {
+							fmt.Println(err)
+						} else {
+							cacheValueArray := make([]interface{}, 0)
+							_, err = common.JSON2Object(redisDb.String(cacheValue), cacheValueArray)
+							if err != nil {
+								return err
+							}
+							delIndex := -1
+							for index, value := range cacheValueArray {
+								if value == v {
+									delIndex = index
+								}
+							}
+							cacheValueArray = append(cacheValueArray[:delIndex], cacheValueArray[delIndex+1:]...)
+							err = redisDb.Hset(sf.Index[k], k, common.Object2JSON(cacheValueArray))
+							if err != nil {
+								return err
+							}
+						}
+					}
+
 				}
 			}
 		}
