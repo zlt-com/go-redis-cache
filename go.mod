@@ -15,3 +15,4 @@ require (
 )
 
 replace github.com/zlt-com/go-db => ../go-db
+replace github.com/zlt-com/go-common => ../go-common

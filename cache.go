@@ -73,22 +73,18 @@ func getStructField(i interface{}) (sf *StructField) {
 			tags := parseTagSetting(fieldStruct.Tag)
 			fieldName := strings.ToLower(fieldStruct.Name)
 			if len(tags) > 0 {
-				// if fieldName == "id" {
-				// 	sf.Tags[fieldName] = tags
-				// 	sf.Index[fieldName] = sf.TableName + "_" + fieldName
-				// 	sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
-				// } else {
-
-				// }
 				sf.Tags[fieldName] = tags
 				sf.Index[fieldName] = sf.TableName + "_index_" + fieldName
-				sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
+				if refValue.Kind() == reflect.Ptr || refValue.Kind() == reflect.Slice {
+					sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
+				} else {
+					sf.KV[fieldName] = refValue.Field(i).Interface()
+				}
 			}
 			// sf.Values = append(sf.Values, refValue.Elem().Field(i).Interface())
 		}
 		// fmt.Printf("%6s: %v = %v\n", f.Name, f.Type, val)
 	}
-
 	return
 }
 
@@ -101,14 +97,16 @@ func (rc *RedisCache) Select() (reply []interface{}, err error) {
 		for whereKey, whereValue := range rc.Conditions.Where {
 			if whereKey == key {
 				index = value
-				if iv, err := selectIndex(index, whereValue); err != nil {
+				if iv, err := selectIndex(index, whereValue); err != nil || iv == nil {
 					return nil, err
 				} else {
 					indexValue = append(indexValue, redisDb.String(iv))
 				}
 			}
 		}
-
+	}
+	if len(indexValue) == 0 {
+		return
 	}
 	// if indexValue, err := selectIndex(index, rc.Conditions.Value); err == nil && indexValue != nil {
 	// 	if reply, err = redisDb.Hget(sf.TableName, redisDb.String(indexValue)); err == nil && reply != nil {
@@ -142,6 +140,7 @@ func (rc *RedisCache) Delete() (err error) {
 
 	default:
 		sf := getStructField(value)
+
 		if err = redisDb.Hdel(sf.TableName, sf.KV["id"]); err != nil {
 			fmt.Println(err)
 		}
@@ -160,12 +159,17 @@ func (rc *RedisCache) Create() (err error) {
 
 	default:
 		sf := getStructField(value)
-		if err = redisDb.Hset(sf.TableName, sf.KV["id"], common.Object2JSON(rc.Conditions.Instance)); err != nil {
-			fmt.Println(err)
+		if exists, err := redisDb.Hexists(sf.TableName, sf.KV["id"]); err == nil {
+			if !exists {
+				if err = redisDb.Hset(sf.TableName, sf.KV["id"], common.Object2JSON(rc.Conditions.Instance)); err == nil {
+					if err = createIndex(sf); err != nil {
+						return err
+					}
+				}
+
+			}
 		}
-		if err = createIndex(sf); err != nil {
-			fmt.Println(err)
-		}
+
 	}
 	return
 }
