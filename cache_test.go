@@ -1,4 +1,4 @@
-package rediscache
+package redcache
 
 import (
 	"testing"

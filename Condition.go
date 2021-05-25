@@ -1,12 +1,12 @@
-package rediscache
+package redcache
 
 type Condition struct {
 	// Field   string
 	// Value   interface{}
 	Model    interface{}
 	Instance interface{}
-	Offset   int
-	Limit    int
-	OrderBy  string
+	Offset   interface{}
+	Limit    interface{}
+	OrderBy  interface{}
 	Where    map[string]interface{}
 }
