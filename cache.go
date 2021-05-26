@@ -52,20 +52,23 @@ func parseTagSetting(tags reflect.StructTag) map[string]string {
 	return setting
 }
 
-func getStructField(i interface{}) (sf *StructField) {
-	reflectType := reflect.ValueOf(i).Type()
-	refValue := reflect.ValueOf(i)
+var structFieldMap = make(map[string]*StructField)
+
+func getStructField(m interface{}) (sf *StructField) {
+	reflectType := reflect.ValueOf(m).Type()
+	refValue := reflect.ValueOf(m)
 	for reflectType.Kind() == reflect.Slice || reflectType.Kind() == reflect.Ptr {
 		reflectType = reflectType.Elem()
 	}
-
+	modelName := reflectType.Name()
+	if structFieldMap[modelName] != nil {
+		return structFieldMap[modelName]
+	}
 	sf = new(StructField)
 
-	result := common.ReflectMethod(i, "TableName")
+	result := common.ReflectMethod(m, "TableName")
 	sf.TableName = result[0].String()
-
 	sf.Tags = make(map[string]map[string]string)
-	sf.KV = make(map[string]interface{})
 	sf.Index = make(map[string]string)
 	for i := 0; i < reflectType.NumField(); i++ {
 		if fieldStruct := reflectType.Field(i); ast.IsExported(fieldStruct.Name) {
@@ -85,24 +88,47 @@ func getStructField(i interface{}) (sf *StructField) {
 					sf.Index[fieldName] = sf.TableName + "_index_" + fieldName
 				}
 
-				if refValue.Kind() == reflect.Ptr || refValue.Kind() == reflect.Slice {
-					sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
-				} else {
-					sf.KV[fieldName] = refValue.Field(i).Interface()
-				}
+				// if refValue.Kind() == reflect.Ptr || refValue.Kind() == reflect.Slice {
+				// 	sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
+				// } else {
+				// 	sf.KV[fieldName] = refValue.Field(i).Interface()
+				// }
 			}
+
 			// sf.Values = append(sf.Values, refValue.Elem().Field(i).Interface())
 		}
 		// fmt.Printf("%6s: %v = %v\n", f.Name, f.Type, val)
 	}
+	structFieldMap[modelName] = sf
 	return
 }
 
+func makeKeyValue(m interface{}) map[string]interface{} {
+	kv := make(map[string]interface{})
+	reflectType := reflect.ValueOf(m).Type()
+	refValue := reflect.ValueOf(m)
+	for reflectType.Kind() == reflect.Slice || reflectType.Kind() == reflect.Ptr {
+		reflectType = reflectType.Elem()
+	}
+	for i := 0; i < reflectType.NumField(); i++ {
+		if fieldStruct := reflectType.Field(i); ast.IsExported(fieldStruct.Name) {
+			fieldName := strings.ToLower(fieldStruct.Name)
+			if refValue.Kind() == reflect.Ptr || refValue.Kind() == reflect.Slice {
+				kv[fieldName] = refValue.Elem().Field(i).Interface()
+			} else {
+				kv[fieldName] = refValue.Field(i).Interface()
+			}
+		}
+	}
+
+	return kv
+}
+
 // Select
-func (rc *RedCache) Select() (reply []interface{}, count int, err error) {
+func (rc *RedCache) Select() (reply []interface{}, err error) {
 	sf := getStructField(rc.Conditions.Model)
-	if !redisDb.Exists(sf.TableName) {
-		return nil, 0, nil
+	if b, err := redisDb.Exists(sf.TableName); !b || err != nil {
+		return nil, nil
 	}
 	index := ""
 	indexValue := make([]interface{}, 0)
@@ -111,7 +137,7 @@ func (rc *RedCache) Select() (reply []interface{}, count int, err error) {
 			if whereKey == key {
 				index = value
 				if iv, err := selectIndex(index, whereValue); err != nil || iv == nil {
-					return nil, 0, err
+					return nil, err
 				} else {
 					indexValue = append(indexValue, redisDb.String(iv))
 				}
@@ -130,7 +156,7 @@ func (rc *RedCache) Select() (reply []interface{}, count int, err error) {
 
 	if len(indexValue) == 0 {
 		if iv, err := selectRangeIndex(sf.TableName+"_id", rc.Conditions.Offset, rc.Conditions.Limit); err != nil || iv == nil {
-			return nil, 0, err
+			return nil, err
 		} else {
 			indexValue = append(indexValue, iv...)
 		}
@@ -195,9 +221,10 @@ func (rc *RedCache) Create() (err error) {
 
 	default:
 		sf := getStructField(value)
-		if exists, err := redisDb.Hexists(sf.TableName, sf.KV["id"]); err == nil {
+		key := common.ReflectFilde(value, "ID")
+		if exists, err := redisDb.Exists(sf.TableName); err == nil {
 			if !exists {
-				if err = redisDb.Hset(sf.TableName, sf.KV["id"], common.Object2JSON(rc.Conditions.Instance)); err == nil {
+				if err = redisDb.Hset(sf.TableName, key, common.Object2JSON(value)); err == nil {
 					if err = createIndex(sf, rc.Conditions.Instance); err != nil {
 						return err
 					}
@@ -210,7 +237,28 @@ func (rc *RedCache) Create() (err error) {
 	return
 }
 
+func (rc *RedCache) BatchCreate(i []interface{}) (err error) {
+	instances := []interface{}{}
+	sf := new(StructField)
+
+	for i, value := range i {
+		sf = getStructField(value)
+		if i == 0 {
+			instances = append(instances, sf.TableName)
+		}
+		key := common.ReflectFilde(value, "ID")
+		instances = append(instances, key, common.Object2JSON(value))
+	}
+	if err = redisDb.Hmset(instances...); err == nil {
+		if err = createIndex(sf, rc.Conditions.Instance); err != nil {
+			return err
+		}
+	}
+	return
+}
+
 func createIndex(sf *StructField, i interface{}) (err error) {
+	sf.KV = makeKeyValue(i)
 	for k, v := range sf.KV {
 		if k == "id" {
 			if err := redisDb.Zadd(sf.TableName+"_id", v.(int), v); err != nil {
@@ -295,21 +343,27 @@ func (rc *RedCache) Count() (count int, err error) {
 	switch value := rc.Conditions.Model.(type) {
 	default:
 		sf := getStructField(value)
-		if rc.Conditions.Where != nil {
+		if rc.Conditions.Where != nil && len(rc.Conditions.Where) > 0 {
 			indexValue := make([]interface{}, 0)
-			for key := range sf.Index {
-				for whereKey := range rc.Conditions.Where {
-					if whereKey == key {
-						if tag := sf.Tags[whereKey]; tag != nil && len(indexValue) > 0 {
-							for _, tv := range tag {
-								if tv == "MUILT_INDEX" {
-									// array := make([]interface{}, 0)
-									_, err = common.JSON2Object(indexValue[0].(string), &indexValue)
+			for whereKey, whereValue := range rc.Conditions.Where {
+				key := sf.Index[whereKey]
+				if key != "" {
+					if tag := sf.Tags[whereKey]; tag != nil {
+						for _, tv := range tag {
+							if tv == "MUILT_INDEX" {
+								// array := make([]interface{}, 0)
+								if reply, err := redisDb.Hget(key, whereValue); err != nil {
+									return 0, err
+								} else {
+									if _, err = common.JSON2Object(redisDb.String(reply), &indexValue); err != nil {
+										return 0, err
+									}
 								}
+							} else {
+								return 1, err
 							}
 						}
 					}
-
 				}
 			}
 			count = len(indexValue)
@@ -320,4 +374,28 @@ func (rc *RedCache) Count() (count int, err error) {
 		}
 	}
 	return
+}
+
+var (
+	syncstatus = "syncstatus"
+)
+
+//设置同步状态
+func (rc *RedCache) SetSyncStatus(status map[string]bool) (reply interface{}, err error) {
+	json := common.Object2JSON(status)
+	return redisDb.Set(syncstatus, json)
+}
+
+func (rc *RedCache) GetSyncStatus() (status map[string]bool, err error) {
+	status = make(map[string]bool)
+	if ex, err := redisDb.Exists(syncstatus); ex && err == nil {
+		if statusValue, err := redisDb.Get(syncstatus); err == nil {
+			_, err = common.JSON2Object(statusValue.(string), &status)
+			return status, err
+		} else {
+			return make(map[string]bool), nil
+		}
+	} else {
+		return make(map[string]bool), nil
+	}
 }
