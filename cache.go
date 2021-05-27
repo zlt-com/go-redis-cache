@@ -10,26 +10,65 @@ import (
 	database "github.com/zlt-com/go-db"
 )
 
-var redisDb database.RedisDB
-
-func init() {
-	database.Open([]string{"mysql", "redis"})
+var (
+	//存储缓存数据加载情况，数据库和缓存数据量一致为真
+	SyncCache = make(map[string]bool)
+	//是否使用缓存
+	UseRedcache = true
+	//redis数据库实例，默认是0号
 	redisDb = database.RedisDB{DBNum: 0}
-	// info, err := redisDb.Info()
-	// fmt.Println(string(info.([]byte)[:]), err)
-}
+)
 
 type StructField struct {
 	TableName string
 	Name      string
-	KV        map[string]interface{}
 	Tags      map[string]map[string]string
 	Index     map[string]string
+	IndexKv   map[string]interface{}
 }
 
 type RedCache struct {
-	// StructFields *StructField
-	Conditions Condition
+	model interface{}
+	// instance interface{}
+	offset  interface{}
+	limit   interface{}
+	orderBy interface{}
+	where   map[string]interface{}
+}
+
+func New() (redCache *RedCache) {
+	redCache = new(RedCache)
+	return
+}
+
+func (rc *RedCache) Model(model interface{}) *RedCache {
+	rc.model = model
+	return rc
+}
+
+// func (rc *RedCache) Instance(instance interface{}) *RedCache {
+// 	rc.instance = instance
+// 	return rc
+// }
+
+func (rc *RedCache) Offset(offset interface{}) *RedCache {
+	rc.offset = offset
+	return rc
+}
+
+func (rc *RedCache) Limit(limit interface{}) *RedCache {
+	rc.limit = limit
+	return rc
+}
+
+func (rc *RedCache) OrderBy(orderBy interface{}) *RedCache {
+	rc.orderBy = orderBy
+	return rc
+}
+
+func (rc *RedCache) Where(where map[string]interface{}) *RedCache {
+	rc.where = where
+	return rc
 }
 
 func parseTagSetting(tags reflect.StructTag) map[string]string {
@@ -87,15 +126,7 @@ func getStructField(m interface{}) (sf *StructField) {
 				} else {
 					sf.Index[fieldName] = sf.TableName + "_index_" + fieldName
 				}
-
-				// if refValue.Kind() == reflect.Ptr || refValue.Kind() == reflect.Slice {
-				// 	sf.KV[fieldName] = refValue.Elem().Field(i).Interface()
-				// } else {
-				// 	sf.KV[fieldName] = refValue.Field(i).Interface()
-				// }
 			}
-
-			// sf.Values = append(sf.Values, refValue.Elem().Field(i).Interface())
 		}
 		// fmt.Printf("%6s: %v = %v\n", f.Name, f.Type, val)
 	}
@@ -103,37 +134,20 @@ func getStructField(m interface{}) (sf *StructField) {
 	return
 }
 
-func makeKeyValue(m interface{}) map[string]interface{} {
-	kv := make(map[string]interface{})
-	reflectType := reflect.ValueOf(m).Type()
-	refValue := reflect.ValueOf(m)
-	for reflectType.Kind() == reflect.Slice || reflectType.Kind() == reflect.Ptr {
-		reflectType = reflectType.Elem()
-	}
-	for i := 0; i < reflectType.NumField(); i++ {
-		if fieldStruct := reflectType.Field(i); ast.IsExported(fieldStruct.Name) {
-			fieldName := strings.ToLower(fieldStruct.Name)
-			if refValue.Kind() == reflect.Ptr || refValue.Kind() == reflect.Slice {
-				kv[fieldName] = refValue.Elem().Field(i).Interface()
-			} else {
-				kv[fieldName] = refValue.Field(i).Interface()
-			}
-		}
-	}
-
-	return kv
-}
-
 // Select
 func (rc *RedCache) Select() (reply []interface{}, err error) {
-	sf := getStructField(rc.Conditions.Model)
+	sf := getStructField(rc.model)
+	//没有设置缓存字段
+	if len(sf.Index) == 0 {
+		return nil, nil
+	}
 	if b, err := redisDb.Exists(sf.TableName); !b || err != nil {
 		return nil, nil
 	}
 	index := ""
 	indexValue := make([]interface{}, 0)
 	for key, value := range sf.Index {
-		for whereKey, whereValue := range rc.Conditions.Where {
+		for whereKey, whereValue := range rc.where {
 			if whereKey == key {
 				index = value
 				if iv, err := selectIndex(index, whereValue); err != nil || iv == nil {
@@ -155,7 +169,7 @@ func (rc *RedCache) Select() (reply []interface{}, err error) {
 	}
 
 	if len(indexValue) == 0 {
-		if iv, err := selectRangeIndex(sf.TableName+"_id", rc.Conditions.Offset, rc.Conditions.Limit); err != nil || iv == nil {
+		if iv, err := selectRangeIndex(sf.TableName+"_id", rc.offset, rc.limit); err != nil || iv == nil {
 			return nil, err
 		} else {
 			indexValue = append(indexValue, iv...)
@@ -195,7 +209,7 @@ func selectRangeIndex(index string, start, end interface{}) ([]interface{}, erro
 }
 
 func (rc *RedCache) Delete() (err error) {
-	switch value := rc.Conditions.Instance.(type) {
+	switch value := rc.model.(type) {
 	case string:
 	case int:
 	case map[interface{}]interface{}:
@@ -203,7 +217,7 @@ func (rc *RedCache) Delete() (err error) {
 	default:
 		sf := getStructField(value)
 
-		if err = redisDb.Hdel(sf.TableName, sf.KV["id"]); err != nil {
+		if err = redisDb.Hdel(sf.TableName, sf.IndexKv["id"]); err != nil {
 			fmt.Println(err)
 		}
 		if err = deleteIndex(sf); err != nil {
@@ -214,7 +228,7 @@ func (rc *RedCache) Delete() (err error) {
 }
 
 func (rc *RedCache) Create() (err error) {
-	switch value := rc.Conditions.Instance.(type) {
+	switch value := rc.model.(type) {
 	case string:
 	case int:
 	case map[interface{}]interface{}:
@@ -225,7 +239,7 @@ func (rc *RedCache) Create() (err error) {
 		if exists, err := redisDb.Exists(sf.TableName); err == nil {
 			if !exists {
 				if err = redisDb.Hset(sf.TableName, key, common.Object2JSON(value)); err == nil {
-					if err = createIndex(sf, rc.Conditions.Instance); err != nil {
+					if err = createIndex(sf, rc.model); err != nil {
 						return err
 					}
 				}
@@ -238,28 +252,32 @@ func (rc *RedCache) Create() (err error) {
 }
 
 func (rc *RedCache) BatchCreate(i []interface{}) (err error) {
+	commandArgs := []interface{}{}
 	instances := []interface{}{}
 	sf := new(StructField)
 
 	for i, value := range i {
 		sf = getStructField(value)
 		if i == 0 {
-			instances = append(instances, sf.TableName)
+			commandArgs = append(commandArgs, sf.TableName)
 		}
 		key := common.ReflectFilde(value, "ID")
-		instances = append(instances, key, common.Object2JSON(value))
+		commandArgs = append(commandArgs, key, common.Object2JSON(value))
+		instances = append(instances, value)
 	}
-	if err = redisDb.Hmset(instances...); err == nil {
-		if err = createIndex(sf, rc.Conditions.Instance); err != nil {
-			return err
+	if err = redisDb.Hmset(commandArgs...); err == nil {
+		for index := 0; index < len(instances); index++ {
+			if err = createIndex(sf, instances[index]); err != nil {
+				return err
+			}
 		}
 	}
 	return
 }
 
 func createIndex(sf *StructField, i interface{}) (err error) {
-	sf.KV = makeKeyValue(i)
-	for k, v := range sf.KV {
+	sf.IndexKv = common.ReflectFildes(i)
+	for k, v := range sf.IndexKv {
 		if k == "id" {
 			if err := redisDb.Zadd(sf.TableName+"_id", v.(int), v); err != nil {
 				fmt.Println(err)
@@ -270,14 +288,14 @@ func createIndex(sf *StructField, i interface{}) (err error) {
 		if tag := sf.Tags[k]; tag != nil {
 			for _, tv := range tag {
 				if tv == "UNIQUE_INDEX" {
-					redisDb.Hset(sf.Index[k], v, sf.KV["id"])
+					redisDb.Hset(sf.Index[k], v, sf.IndexKv["id"])
 				} else if tv == "MUILT_INDEX" {
-					muiltValue := make([]interface{}, 0)
+					muiltValue := make([]int, 0)
 					if ok, _ := redisDb.Hexists(sf.Index[k], v); ok {
 						if indexV, err := redisDb.Hget(sf.Index[k], v); err != nil {
 							fmt.Println(err)
 						} else {
-							arry := make([]interface{}, 0)
+							arry := make([]int, 0)
 							if _, err := common.JSON2Object(redisDb.String(indexV), &arry); err != nil {
 								fmt.Println(err)
 								return err
@@ -286,7 +304,10 @@ func createIndex(sf *StructField, i interface{}) (err error) {
 							}
 						}
 					}
-					muiltValue = append(muiltValue, common.ReflectFilde(i, "ID"))
+					id := common.ReflectFilde(i, "ID")
+					if !common.Contains(id, muiltValue) {
+						muiltValue = append(muiltValue, common.ReflectFilde(i, "ID").(int))
+					}
 					redisDb.Hset(sf.Index[k], v, common.Object2JSON(muiltValue))
 				}
 			}
@@ -296,7 +317,7 @@ func createIndex(sf *StructField, i interface{}) (err error) {
 }
 
 func deleteIndex(sf *StructField) (err error) {
-	for k, v := range sf.KV {
+	for k, v := range sf.IndexKv {
 		if k == "id" {
 			if err := redisDb.Zrem(sf.TableName+"_id", v); err != nil {
 				fmt.Println(err)
@@ -340,19 +361,19 @@ func deleteIndex(sf *StructField) (err error) {
 }
 
 func (rc *RedCache) Count() (count int, err error) {
-	switch value := rc.Conditions.Model.(type) {
+	switch value := rc.model.(type) {
 	default:
 		sf := getStructField(value)
-		if rc.Conditions.Where != nil && len(rc.Conditions.Where) > 0 {
+		if rc.where != nil && len(rc.where) > 0 {
 			indexValue := make([]interface{}, 0)
-			for whereKey, whereValue := range rc.Conditions.Where {
+			for whereKey, whereValue := range rc.where {
 				key := sf.Index[whereKey]
 				if key != "" {
 					if tag := sf.Tags[whereKey]; tag != nil {
 						for _, tv := range tag {
 							if tv == "MUILT_INDEX" {
 								// array := make([]interface{}, 0)
-								if reply, err := redisDb.Hget(key, whereValue); err != nil {
+								if reply, err := redisDb.Hget(key, whereValue); err != nil || reply == nil {
 									return 0, err
 								} else {
 									if _, err = common.JSON2Object(redisDb.String(reply), &indexValue); err != nil {
