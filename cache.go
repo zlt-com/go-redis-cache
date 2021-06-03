@@ -94,11 +94,7 @@ func parseTagSetting(tags reflect.StructTag) map[string]string {
 var structFieldMap = make(map[string]*StructField)
 
 func getStructField(m interface{}) (sf *StructField) {
-	reflectType := reflect.ValueOf(m).Type()
-	refValue := reflect.ValueOf(m)
-	for reflectType.Kind() == reflect.Slice || reflectType.Kind() == reflect.Ptr {
-		reflectType = reflectType.Elem()
-	}
+	reflectType, refValue := common.ReflectInterfaceTypeValue(m)
 	modelName := reflectType.Name()
 	if structFieldMap[modelName] != nil {
 		return structFieldMap[modelName]
